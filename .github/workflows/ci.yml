@@ -253,22 +253,28 @@ jobs:
                 -o PreferredAuthentications=publickey,keyboard-interactive \
                 -p 2299 tester@localhost 'echo LOGIN-OK' < /dev/null 2>&1 | tail -1
           }
-          # the earlier probes only rewrote sshd.pam, so if PAM reads the plain
-          # sshd service they were all testing an untouched file
-          set_files() { docker exec otp-diag sh -c 'printf "%b" "$1" > /etc/pam.d/sshd; printf "%b" "$2" > /etc/pam.d/sshd.pam' _ "$1" "$2"; }
-          PERMIT='#%PAM-1.0\nauth required pam_permit.so\naccount required pam_permit.so\nsession required pam_permit.so\n'
-          DENY='#%PAM-1.0\nauth required pam_deny.so\naccount required pam_permit.so\nsession required pam_permit.so\n'
+          # cross probing the two names showed sshd is the one PAM resolves, so
+          # everything below rewrites /etc/pam.d/sshd only
+          set_stack() {
+            docker exec otp-diag sh -c 'printf "%b" "$1" > /etc/pam.d/sshd' _ "$1"
+            docker exec otp-diag cat /etc/pam.d/sshd
+          }
+          OK='account required pam_permit.so\nsession required pam_permit.so\n'
 
-          echo "===== 1. both files permit: does PAM matter at all? ====="
-          set_files "$PERMIT" "$PERMIT"
+          echo "===== 1. the stack we generate, as a baseline ====="
+          set_stack '#%PAM-1.0\n#auth      include   base-auth\naccount   include   base-account\npassword  include   base-password\nsession   include   base-session\nauth required pam_google_authenticator.so nullok secret=/config/.google_authenticator\n'
           probe
 
-          echo "===== 2. sshd=permit, sshd.pam=deny ====="
-          set_files "$PERMIT" "$DENY"
+          echo "===== 2. the module alone, no secret=, permissive rest ====="
+          set_stack "#%PAM-1.0\nauth required pam_google_authenticator.so nullok\n$OK"
           probe
 
-          echo "===== 3. sshd=deny, sshd.pam=permit ====="
-          set_files "$DENY" "$PERMIT"
+          echo "===== 3. the module alone, with secret=, permissive rest ====="
+          set_stack "#%PAM-1.0\nauth required pam_google_authenticator.so nullok secret=/config/.google_authenticator\n$OK"
+          probe
+
+          echo "===== 4. permit auth, but the stock account and session ====="
+          set_stack '#%PAM-1.0\nauth required pam_permit.so\naccount   include   base-account\npassword  include   base-password\nsession   include   base-session\n'
           probe
 
           echo "===== sshd log ====="
