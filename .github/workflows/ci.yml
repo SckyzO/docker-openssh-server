@@ -142,19 +142,24 @@ jobs:
               -p 2223 tester@localhost 'echo FIRST-LOGIN-OK' < /dev/null \
             || { echo "--- sshd log ---"; docker logs otp-on; exit 1; }
 
+          # output goes to a file rather than into grep -q, which exits on its
+          # first match and leaves the writer with a SIGPIPE that pipefail
+          # reports as a failure of the whole step
           echo "The banner must point an unenrolled user at otp-setup..."
           printf 'exit\n' | ssh -tt -i /tmp/test_key \
               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               -o ConnectTimeout=10 \
-              -p 2223 tester@localhost 2>/dev/null | grep -q "otp-setup" \
-            || { echo "FAIL: the enrollment banner was not shown"; exit 1; }
+              -p 2223 tester@localhost > /tmp/banner.txt 2>/dev/null || true
+          grep -q "otp-setup" /tmp/banner.txt \
+            || { echo "FAIL: the enrollment banner was not shown"; cat /tmp/banner.txt; exit 1; }
 
           echo "Enrolling through the helper..."
           docker exec -u tester otp-on otp-setup
           docker exec otp-on test -f /config/.google_authenticator
           [ "$(docker exec otp-on stat -c '%a %U' /config/.google_authenticator)" = "600 tester" ] \
             || { echo "FAIL: wrong mode or owner on the secret"; exit 1; }
-          docker exec -u tester otp-on otp-setup --show | grep -q "scratch codes"
+          docker exec -u tester otp-on otp-setup --show > /tmp/otp-show.txt
+          grep -q "scratch codes" /tmp/otp-show.txt
 
           echo "After enrolment the key alone must be refused..."
           if ssh -i /tmp/test_key \
