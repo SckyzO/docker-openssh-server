@@ -86,6 +86,54 @@ else
     echo "User/password ssh access is disabled."
 fi
 
+# otp (2FA) access
+OTP_SECRET=/config/.google_authenticator
+
+# both files are rebuilt from a known state on every start so the variable can
+# be turned back off again
+if [[ "$OTP_ACCESS" == "true" ]] || grep -q "pam_google_authenticator.so" /etc/pam.d/sshd; then
+    cp -a /etc/pam.d/sshd.default /etc/pam.d/sshd
+fi
+sed -i '/^# >>> OTP_ACCESS >>>$/,/^# <<< OTP_ACCESS <<<$/d' /config/sshd/sshd_config
+
+if [[ "$OTP_ACCESS" == "true" ]]; then
+    # sshd runs the whole PAM auth stack for keyboard-interactive, so the unix
+    # password prompt is only left in place when password access is enabled too
+    if [[ "$PASSWORD_ACCESS" == "true" ]]; then
+        AUTH_METHODS="keyboard-interactive publickey,keyboard-interactive"
+    else
+        AUTH_METHODS="publickey,keyboard-interactive"
+        sed -i -E 's/^[[:space:]]*auth[[:space:]]/#&/' /etc/pam.d/sshd
+    fi
+
+    # nullok lets a user that has not enrolled yet log in, which is what makes
+    # the first google-authenticator run possible
+    echo "auth required pam_google_authenticator.so nullok secret=${OTP_SECRET}" >> /etc/pam.d/sshd
+
+    # sshd keeps the first value it reads for a keyword, so an active setting
+    # earlier in the file silently wins over the block appended below
+    if grep -qE '^[[:space:]]*(UsePAM|KbdInteractiveAuthentication|AuthenticationMethods)[[:space:]]' /config/sshd/sshd_config; then
+        echo "*** WARNING: /config/sshd/sshd_config already sets UsePAM, KbdInteractiveAuthentication or AuthenticationMethods. Remove those lines, otherwise OTP will not be enforced. ***"
+    fi
+
+    cat >> /config/sshd/sshd_config << EOF
+# >>> OTP_ACCESS >>>
+UsePAM yes
+KbdInteractiveAuthentication yes
+AuthenticationMethods ${AUTH_METHODS}
+# <<< OTP_ACCESS <<<
+EOF
+
+    if [[ -f "$OTP_SECRET" ]]; then
+        echo "OTP (2FA) ssh access is enabled."
+    else
+        echo "OTP (2FA) ssh access is enabled, but ${USER_NAME} has no secret yet and is not prompted for a code."
+        echo "Run 'google-authenticator -s ${OTP_SECRET}' as ${USER_NAME} to enroll."
+    fi
+else
+    echo "OTP (2FA) ssh access is disabled."
+fi
+
 # set umask for sftp
 UMASK=${UMASK:-022}
 sed -i "s|/usr/lib/ssh/sftp-server$|/usr/lib/ssh/sftp-server -u ${UMASK}|g" /config/sshd/sshd_config
