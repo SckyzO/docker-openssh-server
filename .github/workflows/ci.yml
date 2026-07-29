@@ -106,60 +106,6 @@ jobs:
               -p 2222 tester@localhost 'echo SSH-OK-NO-OTP'
           docker rm -f otp-off
 
-      - name: 'Diagnose which layer of the PAM stack denies'
-        run: |
-          # the runner starts steps with bash -e, and every probe here is
-          # expected to fail at least once, so failures must not abort
-          set +e
-          docker run -d --name otp-diag -p 2226:2222 \
-            -e PUBLIC_KEY="$(cat /tmp/test_key.pub)" \
-            -e USER_NAME=tester -e OTP_ACCESS=true -e LOG_STDOUT=true \
-            openssh-server:test
-          for _ in $(seq 1 60); do nc -z localhost 2226 && break; sleep 1; done
-          sleep 2
-
-          # PAM re-reads its config per authentication, so no restart is needed
-          # between these variants
-          try() {
-            ssh -i /tmp/test_key \
-                -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-                -o ConnectTimeout=10 \
-                -o PreferredAuthentications=publickey,keyboard-interactive \
-                -p 2226 tester@localhost 'echo LOGIN-OK' < /dev/null 2>&1 | tail -2
-          }
-          set_stack() { docker exec otp-diag sh -c 'printf "%b" "$1" > /etc/pam.d/sshd.pam' _ "$1"; }
-
-          echo "== 1. the stack we generate =="
-          try
-
-          echo "== 2. pam_permit everywhere =="
-          set_stack '#%PAM-1.0\nauth required pam_permit.so\naccount required pam_permit.so\nsession required pam_permit.so\n'
-          try
-
-          echo "== 3. pam_permit auth, stock account/session =="
-          set_stack '#%PAM-1.0\nauth required pam_permit.so\naccount include base-account\npassword include base-password\nsession include base-session\n'
-          try
-
-          echo "== 4. google-authenticator, permissive account/session =="
-          set_stack '#%PAM-1.0\nauth required pam_google_authenticator.so nullok debug secret=/config/.google_authenticator\naccount required pam_permit.so\nsession required pam_permit.so\n'
-          try
-
-          echo "== 5. google-authenticator without secret=, default \$HOME =="
-          set_stack '#%PAM-1.0\nauth required pam_google_authenticator.so nullok debug\naccount required pam_permit.so\nsession required pam_permit.so\n'
-          try
-
-          echo "== 6. module marked sufficient rather than required =="
-          set_stack '#%PAM-1.0\nauth sufficient pam_google_authenticator.so nullok debug\nauth required pam_permit.so\naccount required pam_permit.so\nsession required pam_permit.so\n'
-          try
-
-          echo "== where the module lives =="
-          docker exec otp-diag ls -l /usr/lib/security/ 2>&1 | head -20
-
-          echo "== sshd log =="
-          docker logs otp-diag 2>&1 | tail -25
-          docker rm -f otp-diag
-        continue-on-error: true
-
       - name: 'OTP on: key only until enrolled, then a code is required'
         run: |
           set -euo pipefail
@@ -267,6 +213,59 @@ jobs:
           echo "OK: the persisted config was cleaned up"
           docker rm -f otp-toggle
 
+      # Last on purpose: it runs even when the strict steps above fail, and its
+      # output then sits at the end of the job log where it is easy to read.
+      - name: 'Diagnose: is it the PAM stack, or sshd not being root?'
+        if: always()
+        run: |
+          # the runner starts steps with bash -e and these probes are expected
+          # to fail, so failures must not abort the step
+          set +e
+          docker rm -f otp-diag 2>/dev/null
+          docker run -d --name otp-diag -p 2226:2222 \
+            -e PUBLIC_KEY="$(cat /tmp/test_key.pub)" \
+            -e USER_NAME=tester -e OTP_ACCESS=true -e LOG_STDOUT=true \
+            openssh-server:test
+          for _ in $(seq 1 60); do nc -z localhost 2226 && break; sleep 1; done
+          sleep 2
+
+          echo "===== A. can a stack that cannot deny still deny? ====="
+          # PAM re-reads its config per authentication, so no restart is needed
+          docker exec otp-diag sh -c 'printf "%b" "#%PAM-1.0\nauth required pam_permit.so\naccount required pam_permit.so\nsession required pam_permit.so\n" > /etc/pam.d/sshd.pam'
+          echo "--- the stack sshd will read, proving the write landed ---"
+          docker exec otp-diag cat /etc/pam.d/sshd.pam
+          echo "--- login attempt ---"
+          ssh -i /tmp/test_key \
+              -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              -o ConnectTimeout=10 \
+              -o PreferredAuthentications=publickey,keyboard-interactive \
+              -p 2226 tester@localhost 'echo PERMIT-LOGIN-OK' < /dev/null 2>&1 | tail -2
+
+          echo "===== B. same stack, but sshd running as root ====="
+          # the only difference with the service above is the uid: the s6 service
+          # starts sshd under s6-setuidgid, this one stays root
+          docker cp /tmp/test_key otp-diag:/tmp/test_key
+          docker exec otp-diag chmod 600 /tmp/test_key
+          docker exec otp-diag chown root:root /tmp/test_key
+          docker exec -d otp-diag /usr/sbin/sshd.pam -D -p 2299 \
+            -f /config/sshd/sshd_config \
+            -h /config/ssh_host_keys/ssh_host_ed25519_key \
+            -o PidFile=/tmp/sshd-root.pid \
+            -o PerSourcePenalties=no
+          sleep 3
+          echo "--- who is listening ---"
+          docker exec otp-diag netstat -ltnp 2>/dev/null | grep -E '2299|2222'
+          echo "--- login attempt against the root sshd ---"
+          docker exec otp-diag ssh -i /tmp/test_key \
+              -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              -o ConnectTimeout=10 \
+              -o PreferredAuthentications=publickey,keyboard-interactive \
+              -p 2299 tester@localhost 'echo ROOT-SSHD-LOGIN-OK' < /dev/null 2>&1 | tail -3
+
+          echo "===== sshd log ====="
+          docker logs otp-diag 2>&1 | tail -12
+          docker rm -f otp-diag
+
       - name: Cleanup
         if: always()
-        run: docker rm -f hc hc-port otp-off otp-on otp-pw otp-toggle 2>/dev/null || true
+        run: docker rm -f hc hc-port otp-off otp-on otp-pw otp-toggle otp-diag 2>/dev/null || true
