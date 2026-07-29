@@ -37,7 +37,7 @@ case "${1:-}" in
         ;;
     "")
         if [[ -f "$SECRET_FILE" ]]; then
-            read -r -p "A secret already exists in ${SECRET_FILE}. Regenerating invalidates the old one. Continue? [y/N] " answer
+            read -r -p "A secret already exists in ${SECRET_FILE}. Regenerating invalidates the old one. Continue? [y/N] " answer || answer=""
             if [[ ! "$answer" =~ ^[Yy]$ ]]; then
                 echo "Aborted."
                 exit 0
@@ -47,9 +47,17 @@ case "${1:-}" in
             echo "Old secret kept in ${backup}"
         fi
 
+        # typing the first code back catches a QR that was scanned wrong, but
+        # there is nothing to type it with when this runs without a terminal,
+        # as it does under docker exec
+        confirm=()
+        if [[ ! -t 0 ]]; then
+            confirm=(--no-confirm)
+        fi
+
         # -t time based, -d one use per code, -f write without asking,
         # -r 3 -R 30 three attempts per 30s, -W narrow the accepted time window
-        google-authenticator -t -d -f -r 3 -R 30 -W -s "$SECRET_FILE"
+        google-authenticator -t -d -f -r 3 -R 30 -W "${confirm[@]}" -s "$SECRET_FILE"
         chmod 600 "$SECRET_FILE"
 
         echo
