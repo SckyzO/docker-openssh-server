@@ -25,6 +25,8 @@ jobs:
             ls /usr/lib/security/pam_google_authenticator.so
             test -x /healthcheck.sh
             test -f /etc/pam.d/sshd.default
+            test -x /usr/local/bin/otp-setup
+            test -f /etc/profile.d/otp-setup.sh
           '
 
       - name: Show the stock PAM stack
@@ -111,12 +113,15 @@ jobs:
             -e PUBLIC_KEY="$(cat /tmp/test_key.pub)" \
             -e USER_NAME=tester \
             -e OTP_ACCESS=true \
+            -e LOG_STDOUT=true \
             openssh-server:test
           for _ in $(seq 1 60); do nc -z localhost 2223 && break; sleep 1; done
           nc -z localhost 2223 || { docker logs otp-on; exit 1; }
           sleep 2
 
-          echo "--- sshd_config ---"; docker exec otp-on cat /config/sshd/sshd_config
+          echo "--- pam.d ---"; docker exec otp-on ls -l /etc/pam.d/
+          echo "--- user ---"; docker exec otp-on getent passwd tester
+          echo "--- sshd process ---"; docker exec otp-on ps -o pid,user,args | grep -i sshd
           echo "--- pam.d/sshd.pam ---"; docker exec otp-on cat /etc/pam.d/sshd.pam
 
           docker exec otp-on grep -q "^UsePAM yes$" /config/sshd/sshd_config
@@ -130,12 +135,21 @@ jobs:
               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               -o ConnectTimeout=10 -o BatchMode=yes \
               -p 2223 tester@localhost 'echo FIRST-LOGIN-OK' \
-            || { docker logs otp-on; exit 1; }
+            || { echo "--- sshd log ---"; docker logs otp-on; exit 1; }
 
-          echo "Enrolling the user..."
-          docker exec otp-on google-authenticator -t -d -f -r 3 -R 30 -W -q -s /config/.google_authenticator
-          docker exec otp-on chown tester:tester /config/.google_authenticator
-          docker exec otp-on chmod 600 /config/.google_authenticator
+          echo "The banner must point an unenrolled user at otp-setup..."
+          printf 'exit\n' | ssh -tt -i /tmp/test_key \
+              -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              -o ConnectTimeout=10 \
+              -p 2223 tester@localhost 2>/dev/null | grep -q "otp-setup" \
+            || { echo "FAIL: the enrollment banner was not shown"; exit 1; }
+
+          echo "Enrolling through the helper..."
+          docker exec -u tester otp-on otp-setup
+          docker exec otp-on test -f /config/.google_authenticator
+          [ "$(docker exec otp-on stat -c '%a %U' /config/.google_authenticator)" = "600 tester" ] \
+            || { echo "FAIL: wrong mode or owner on the secret"; exit 1; }
+          docker exec -u tester otp-on otp-setup --show | grep -q "scratch codes"
 
           echo "After enrolment the key alone must be refused..."
           if ssh -i /tmp/test_key \
