@@ -229,11 +229,11 @@ jobs:
           for _ in $(seq 1 60); do nc -z localhost 2226 && break; sleep 1; done
           sleep 2
 
-          echo "===== is UsePAM even a supported option in this build? ====="
-          # if sshd was built without PAM it prints 'Unsupported option UsePAM'
-          # and silently ignores it, which would explain a denial no stack can fix
-          docker exec otp-diag /usr/sbin/sshd.pam -T -f /config/sshd/sshd_config 2>&1 \
-            | grep -iE '^(usepam|kbdinteractiveauthentication|authenticationmethods|passwordauthentication)|unsupported'
+          # the module refuses by bare name and by absolute path alike, so stop
+          # guessing: it logs its reason through syslog, and nothing in the
+          # container collects that, so start a collector and read it
+          docker exec -d otp-diag syslogd -n -O /var/log/pam.log
+          sleep 1
 
           # probes run against a private sshd so the per-source penalty of
           # OpenSSH 9.8+ cannot start dropping connections mid-diagnosis
@@ -261,27 +261,15 @@ jobs:
           }
           OK='account required pam_permit.so\nsession required pam_permit.so\n'
 
-          # the module denies whatever its options are, which is what a module
-          # that never loads looks like: PAM cannot run it, and required fails
-          echo "===== where do the modules actually live? ====="
-          docker exec otp-diag ls -ld /lib /usr/lib /lib/security /usr/lib/security 2>&1
-          echo "--- /lib/security ---"
-          docker exec otp-diag sh -c 'ls /lib/security/ 2>&1 | head -30'
-          echo "--- /usr/lib/security ---"
-          docker exec otp-diag sh -c 'ls /usr/lib/security/ 2>&1 | head -30'
-          echo "--- can the module resolve its own dependencies? ---"
-          docker exec otp-diag sh -c 'ldd /usr/lib/security/pam_google_authenticator.so 2>&1 | head -10'
-
-          echo "===== A. the module by bare name (control, expected to deny) ====="
-          set_stack "#%PAM-1.0\nauth required pam_google_authenticator.so nullok\n$OK"
+          echo "===== the module, with debug, saying why it refuses ====="
+          set_stack "#%PAM-1.0\nauth required pam_google_authenticator.so nullok debug\n$OK"
           probe
 
-          echo "===== B. the module by absolute path ====="
-          set_stack "#%PAM-1.0\nauth required /usr/lib/security/pam_google_authenticator.so nullok\n$OK"
-          probe
+          echo "===== what the module logged ====="
+          docker exec otp-diag sh -c 'cat /var/log/pam.log 2>&1 | tail -20'
 
-          echo "===== sshd log ====="
-          docker logs otp-diag 2>&1 | tail -8
+          echo "===== does the shared object resolve ====="
+          docker exec otp-diag sh -c 'ldd /usr/lib/security/pam_google_authenticator.so 2>&1 | head -6'
           docker rm -f otp-diag
 
       - name: Cleanup
