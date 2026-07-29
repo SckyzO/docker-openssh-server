@@ -92,23 +92,32 @@ OTP_SECRET=/config/.google_authenticator
 # both files are rebuilt from a known state on every start so the variable can
 # be turned back off again
 if [[ "$OTP_ACCESS" == "true" ]] || grep -q "pam_google_authenticator.so" /etc/pam.d/sshd; then
-    cp -a /etc/pam.d/sshd.default /etc/pam.d/sshd
+    cp /etc/pam.d/sshd.default /etc/pam.d/sshd
+
+    if [[ "$OTP_ACCESS" == "true" ]]; then
+        # the whole PAM auth stack runs for keyboard-interactive, so the unix
+        # password prompt is only left in place when password access is on too
+        if [[ "$PASSWORD_ACCESS" != "true" ]]; then
+            sed -i -E 's/^[[:space:]]*auth[[:space:]]/#&/' /etc/pam.d/sshd
+        fi
+
+        # nullok lets a user that has not enrolled yet log in, which is what
+        # makes the first google-authenticator run possible
+        echo "auth required pam_google_authenticator.so nullok secret=${OTP_SECRET}" >> /etc/pam.d/sshd
+    fi
+
+    # the server is started as sshd.pam, and PAM takes its service name from
+    # argv[0], so the stack it actually reads is /etc/pam.d/sshd.pam
+    cp /etc/pam.d/sshd /etc/pam.d/sshd.pam
 fi
 sed -i '/^# >>> OTP_ACCESS >>>$/,/^# <<< OTP_ACCESS <<<$/d' /config/sshd/sshd_config
 
 if [[ "$OTP_ACCESS" == "true" ]]; then
-    # sshd runs the whole PAM auth stack for keyboard-interactive, so the unix
-    # password prompt is only left in place when password access is enabled too
     if [[ "$PASSWORD_ACCESS" == "true" ]]; then
         AUTH_METHODS="keyboard-interactive publickey,keyboard-interactive"
     else
         AUTH_METHODS="publickey,keyboard-interactive"
-        sed -i -E 's/^[[:space:]]*auth[[:space:]]/#&/' /etc/pam.d/sshd
     fi
-
-    # nullok lets a user that has not enrolled yet log in, which is what makes
-    # the first google-authenticator run possible
-    echo "auth required pam_google_authenticator.so nullok secret=${OTP_SECRET}" >> /etc/pam.d/sshd
 
     # sshd keeps the first value it reads for a keyword, so an active setting
     # earlier in the file silently wins over the block appended below

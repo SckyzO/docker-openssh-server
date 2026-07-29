@@ -28,7 +28,9 @@ jobs:
           '
 
       - name: Show the stock PAM stack
-        run: docker run --rm openssh-server:test cat /etc/pam.d/sshd.default
+        run: |
+          docker run --rm openssh-server:test ls -l /etc/pam.d/
+          docker run --rm openssh-server:test cat /etc/pam.d/sshd.default
 
       - name: Generate test SSH keypair
         run: ssh-keygen -t ed25519 -N "" -f /tmp/test_key -C ci-test
@@ -91,7 +93,7 @@ jobs:
             echo "FAIL: managed block present while OTP_ACCESS is unset"
             exit 1
           fi
-          if docker exec otp-off grep -q "pam_google_authenticator" /etc/pam.d/sshd; then
+          if docker exec otp-off grep -q "pam_google_authenticator" /etc/pam.d/sshd /etc/pam.d/sshd.pam; then
             echo "FAIL: pam_google_authenticator present while OTP_ACCESS is unset"
             exit 1
           fi
@@ -115,12 +117,13 @@ jobs:
           sleep 2
 
           echo "--- sshd_config ---"; docker exec otp-on cat /config/sshd/sshd_config
-          echo "--- pam.d/sshd ---"; docker exec otp-on cat /etc/pam.d/sshd
+          echo "--- pam.d/sshd.pam ---"; docker exec otp-on cat /etc/pam.d/sshd.pam
 
           docker exec otp-on grep -q "^UsePAM yes$" /config/sshd/sshd_config
           docker exec otp-on grep -q "^KbdInteractiveAuthentication yes$" /config/sshd/sshd_config
           docker exec otp-on grep -q "^AuthenticationMethods publickey,keyboard-interactive$" /config/sshd/sshd_config
           docker exec otp-on grep -q "pam_google_authenticator.so nullok" /etc/pam.d/sshd
+          docker exec otp-on grep -q "pam_google_authenticator.so nullok" /etc/pam.d/sshd.pam
 
           echo "Before enrolment the key alone must be enough..."
           ssh -i /tmp/test_key \
@@ -159,7 +162,7 @@ jobs:
           for _ in $(seq 1 60); do nc -z localhost 2225 && break; sleep 1; done
           sleep 2
           docker exec otp-pw grep -q "^AuthenticationMethods keyboard-interactive publickey,keyboard-interactive$" /config/sshd/sshd_config
-          if docker exec otp-pw grep -qE '^#[[:space:]]*auth[[:space:]]' /etc/pam.d/sshd; then
+          if docker exec otp-pw grep -qE '^#[[:space:]]*auth[[:space:]]' /etc/pam.d/sshd.pam; then
             echo "FAIL: unix auth was commented out while PASSWORD_ACCESS is true"
             exit 1
           fi
