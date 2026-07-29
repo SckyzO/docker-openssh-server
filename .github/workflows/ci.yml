@@ -229,41 +229,50 @@ jobs:
           for _ in $(seq 1 60); do nc -z localhost 2226 && break; sleep 1; done
           sleep 2
 
-          echo "===== A. can a stack that cannot deny still deny? ====="
-          # PAM re-reads its config per authentication, so no restart is needed
-          docker exec otp-diag sh -c 'printf "%b" "#%PAM-1.0\nauth required pam_permit.so\naccount required pam_permit.so\nsession required pam_permit.so\n" > /etc/pam.d/sshd.pam'
-          echo "--- the stack sshd will read, proving the write landed ---"
-          docker exec otp-diag cat /etc/pam.d/sshd.pam
-          echo "--- login attempt ---"
-          ssh -i /tmp/test_key \
-              -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-              -o ConnectTimeout=10 \
-              -o PreferredAuthentications=publickey,keyboard-interactive \
-              -p 2226 tester@localhost 'echo PERMIT-LOGIN-OK' < /dev/null 2>&1 | tail -2
+          echo "===== is UsePAM even a supported option in this build? ====="
+          # if sshd was built without PAM it prints 'Unsupported option UsePAM'
+          # and silently ignores it, which would explain a denial no stack can fix
+          docker exec otp-diag /usr/sbin/sshd.pam -T -f /config/sshd/sshd_config 2>&1 \
+            | grep -iE '^(usepam|kbdinteractiveauthentication|authenticationmethods|passwordauthentication)|unsupported'
 
-          echo "===== B. same stack, but sshd running as root ====="
-          # the only difference with the service above is the uid: the s6 service
-          # starts sshd under s6-setuidgid, this one stays root
+          # probes run against a private sshd so the per-source penalty of
+          # OpenSSH 9.8+ cannot start dropping connections mid-diagnosis
           docker cp /tmp/test_key otp-diag:/tmp/test_key
           docker exec otp-diag chmod 600 /tmp/test_key
-          docker exec otp-diag chown root:root /tmp/test_key
           docker exec -d otp-diag /usr/sbin/sshd.pam -D -p 2299 \
             -f /config/sshd/sshd_config \
             -h /config/ssh_host_keys/ssh_host_ed25519_key \
-            -o PidFile=/tmp/sshd-root.pid \
+            -o PidFile=/tmp/sshd-diag.pid \
             -o PerSourcePenalties=no
           sleep 3
-          echo "--- who is listening ---"
-          docker exec otp-diag netstat -ltnp 2>/dev/null | grep -E '2299|2222'
-          echo "--- login attempt against the root sshd ---"
-          docker exec otp-diag ssh -i /tmp/test_key \
-              -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-              -o ConnectTimeout=10 \
-              -o PreferredAuthentications=publickey,keyboard-interactive \
-              -p 2299 tester@localhost 'echo ROOT-SSHD-LOGIN-OK' < /dev/null 2>&1 | tail -3
+
+          probe() {
+            docker exec otp-diag ssh -i /tmp/test_key \
+                -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                -o ConnectTimeout=10 \
+                -o PreferredAuthentications=publickey,keyboard-interactive \
+                -p 2299 tester@localhost 'echo LOGIN-OK' < /dev/null 2>&1 | tail -1
+          }
+          # the earlier probes only rewrote sshd.pam, so if PAM reads the plain
+          # sshd service they were all testing an untouched file
+          set_files() { docker exec otp-diag sh -c 'printf "%b" "$1" > /etc/pam.d/sshd; printf "%b" "$2" > /etc/pam.d/sshd.pam' _ "$1" "$2"; }
+          PERMIT='#%PAM-1.0\nauth required pam_permit.so\naccount required pam_permit.so\nsession required pam_permit.so\n'
+          DENY='#%PAM-1.0\nauth required pam_deny.so\naccount required pam_permit.so\nsession required pam_permit.so\n'
+
+          echo "===== 1. both files permit: does PAM matter at all? ====="
+          set_files "$PERMIT" "$PERMIT"
+          probe
+
+          echo "===== 2. sshd=permit, sshd.pam=deny ====="
+          set_files "$PERMIT" "$DENY"
+          probe
+
+          echo "===== 3. sshd=deny, sshd.pam=permit ====="
+          set_files "$DENY" "$PERMIT"
+          probe
 
           echo "===== sshd log ====="
-          docker logs otp-diag 2>&1 | tail -12
+          docker logs otp-diag 2>&1 | tail -8
           docker rm -f otp-diag
 
       - name: Cleanup
