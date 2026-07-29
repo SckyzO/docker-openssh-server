@@ -106,6 +106,47 @@ jobs:
               -p 2222 tester@localhost 'echo SSH-OK-NO-OTP'
           docker rm -f otp-off
 
+      - name: 'Diagnose which layer of the PAM stack denies'
+        run: |
+          set -uo pipefail
+          docker run -d --name otp-diag -p 2226:2222 \
+            -e PUBLIC_KEY="$(cat /tmp/test_key.pub)" \
+            -e USER_NAME=tester -e OTP_ACCESS=true -e LOG_STDOUT=true \
+            openssh-server:test
+          for _ in $(seq 1 60); do nc -z localhost 2226 && break; sleep 1; done
+          sleep 2
+
+          # PAM re-reads its config per authentication, so no restart is needed
+          # between these variants
+          try() {
+            ssh -i /tmp/test_key \
+                -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                -o ConnectTimeout=10 \
+                -o PreferredAuthentications=publickey,keyboard-interactive \
+                -p 2226 tester@localhost 'echo LOGIN-OK' < /dev/null 2>&1 | tail -2
+          }
+          set_stack() { docker exec otp-diag sh -c 'printf "%b" "$1" > /etc/pam.d/sshd.pam' _ "$1"; }
+
+          echo "== 1. the stack we generate =="
+          try
+
+          echo "== 2. pam_permit everywhere =="
+          set_stack '#%PAM-1.0\nauth required pam_permit.so\naccount required pam_permit.so\nsession required pam_permit.so\n'
+          try
+
+          echo "== 3. pam_permit auth, stock account/session =="
+          set_stack '#%PAM-1.0\nauth required pam_permit.so\naccount include base-account\npassword include base-password\nsession include base-session\n'
+          try
+
+          echo "== 4. google-authenticator, permissive account/session =="
+          set_stack '#%PAM-1.0\nauth required pam_google_authenticator.so nullok debug secret=/config/.google_authenticator\naccount required pam_permit.so\nsession required pam_permit.so\n'
+          try
+
+          echo "== sshd log =="
+          docker logs otp-diag 2>&1 | tail -25
+          docker rm -f otp-diag
+        continue-on-error: true
+
       - name: 'OTP on: key only until enrolled, then a code is required'
         run: |
           set -euo pipefail
