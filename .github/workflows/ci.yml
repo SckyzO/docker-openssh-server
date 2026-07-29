@@ -130,11 +130,14 @@ jobs:
           docker exec otp-on grep -q "pam_google_authenticator.so nullok" /etc/pam.d/sshd
           docker exec otp-on grep -q "pam_google_authenticator.so nullok" /etc/pam.d/sshd.pam
 
+          # BatchMode would disable keyboard-interactive client side, and the
+          # server requires it, so stdin is closed instead: any prompt fails.
           echo "Before enrolment the key alone must be enough..."
           ssh -i /tmp/test_key \
               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-              -o ConnectTimeout=10 -o BatchMode=yes \
-              -p 2223 tester@localhost 'echo FIRST-LOGIN-OK' \
+              -o ConnectTimeout=10 \
+              -o PreferredAuthentications=publickey,keyboard-interactive \
+              -p 2223 tester@localhost 'echo FIRST-LOGIN-OK' < /dev/null \
             || { echo "--- sshd log ---"; docker logs otp-on; exit 1; }
 
           echo "The banner must point an unenrolled user at otp-setup..."
