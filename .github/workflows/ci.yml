@@ -1,0 +1,198 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - 'feat/**'
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t openssh-server:test .
+
+      - name: Verify the image carries everything the features need
+        run: |
+          docker run --rm openssh-server:test sh -c '
+            set -e
+            which google-authenticator
+            ls /usr/lib/security/pam_google_authenticator.so
+            test -x /healthcheck.sh
+            test -f /etc/pam.d/sshd.default
+          '
+
+      - name: Show the stock PAM stack
+        run: docker run --rm openssh-server:test cat /etc/pam.d/sshd.default
+
+      - name: Generate test SSH keypair
+        run: ssh-keygen -t ed25519 -N "" -f /tmp/test_key -C ci-test
+
+      - name: 'Healthcheck: reports healthy on the default port'
+        run: |
+          set -euo pipefail
+          docker run -d --name hc -p 2222:2222 \
+            -e PUBLIC_KEY="$(cat /tmp/test_key.pub)" \
+            openssh-server:test
+          for _ in $(seq 1 90); do
+            status=$(docker inspect --format '{{.State.Health.Status}}' hc)
+            [ "$status" = healthy ] && break
+            sleep 2
+          done
+          status=$(docker inspect --format '{{.State.Health.Status}}' hc)
+          if [ "$status" != healthy ]; then
+            echo "FAIL: healthcheck never went healthy (status=$status)"
+            docker inspect --format '{{json .State.Health}}' hc
+            docker logs hc
+            exit 1
+          fi
+          echo "OK: container reported healthy"
+          docker rm -f hc
+
+      - name: 'Healthcheck: follows a custom LISTEN_PORT'
+        run: |
+          set -euo pipefail
+          docker run -d --name hc-port -p 2299:2299 \
+            -e PUBLIC_KEY="$(cat /tmp/test_key.pub)" \
+            -e LISTEN_PORT=2299 \
+            openssh-server:test
+          for _ in $(seq 1 90); do
+            status=$(docker inspect --format '{{.State.Health.Status}}' hc-port)
+            [ "$status" = healthy ] && break
+            sleep 2
+          done
+          status=$(docker inspect --format '{{.State.Health.Status}}' hc-port)
+          if [ "$status" != healthy ]; then
+            echo "FAIL: healthcheck never went healthy on port 2299 (status=$status)"
+            docker inspect --format '{{json .State.Health}}' hc-port
+            docker logs hc-port
+            exit 1
+          fi
+          echo "OK: healthcheck picked up LISTEN_PORT"
+          docker rm -f hc-port
+
+      - name: 'OTP off: nothing changes (regression)'
+        run: |
+          set -euo pipefail
+          docker run -d --name otp-off -p 2222:2222 \
+            -e PUBLIC_KEY="$(cat /tmp/test_key.pub)" \
+            -e USER_NAME=tester \
+            openssh-server:test
+          for _ in $(seq 1 60); do nc -z localhost 2222 && break; sleep 1; done
+          nc -z localhost 2222 || { docker logs otp-off; exit 1; }
+          sleep 2
+
+          if docker exec otp-off grep -q "OTP_ACCESS" /config/sshd/sshd_config; then
+            echo "FAIL: managed block present while OTP_ACCESS is unset"
+            exit 1
+          fi
+          if docker exec otp-off grep -q "pam_google_authenticator" /etc/pam.d/sshd; then
+            echo "FAIL: pam_google_authenticator present while OTP_ACCESS is unset"
+            exit 1
+          fi
+
+          ssh -i /tmp/test_key \
+              -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              -o ConnectTimeout=10 -o BatchMode=yes \
+              -p 2222 tester@localhost 'echo SSH-OK-NO-OTP'
+          docker rm -f otp-off
+
+      - name: 'OTP on: key only until enrolled, then a code is required'
+        run: |
+          set -euo pipefail
+          docker run -d --name otp-on -p 2223:2222 \
+            -e PUBLIC_KEY="$(cat /tmp/test_key.pub)" \
+            -e USER_NAME=tester \
+            -e OTP_ACCESS=true \
+            openssh-server:test
+          for _ in $(seq 1 60); do nc -z localhost 2223 && break; sleep 1; done
+          nc -z localhost 2223 || { docker logs otp-on; exit 1; }
+          sleep 2
+
+          echo "--- sshd_config ---"; docker exec otp-on cat /config/sshd/sshd_config
+          echo "--- pam.d/sshd ---"; docker exec otp-on cat /etc/pam.d/sshd
+
+          docker exec otp-on grep -q "^UsePAM yes$" /config/sshd/sshd_config
+          docker exec otp-on grep -q "^KbdInteractiveAuthentication yes$" /config/sshd/sshd_config
+          docker exec otp-on grep -q "^AuthenticationMethods publickey,keyboard-interactive$" /config/sshd/sshd_config
+          docker exec otp-on grep -q "pam_google_authenticator.so nullok" /etc/pam.d/sshd
+
+          echo "Before enrolment the key alone must be enough..."
+          ssh -i /tmp/test_key \
+              -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              -o ConnectTimeout=10 -o BatchMode=yes \
+              -p 2223 tester@localhost 'echo FIRST-LOGIN-OK' \
+            || { docker logs otp-on; exit 1; }
+
+          echo "Enrolling the user..."
+          docker exec otp-on google-authenticator -t -d -f -r 3 -R 30 -W -q -s /config/.google_authenticator
+          docker exec otp-on chown tester:tester /config/.google_authenticator
+          docker exec otp-on chmod 600 /config/.google_authenticator
+
+          echo "After enrolment the key alone must be refused..."
+          if ssh -i /tmp/test_key \
+                 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                 -o ConnectTimeout=10 -o BatchMode=yes \
+                 -o KbdInteractiveAuthentication=no \
+                 -p 2223 tester@localhost 'echo SHOULD-FAIL' 2>/dev/null; then
+            echo "FAIL: ssh was accepted without a code"
+            exit 1
+          fi
+          echo "OK: a verification code is now required"
+          docker rm -f otp-on
+
+      - name: 'OTP on with PASSWORD_ACCESS: the password stays in the stack'
+        run: |
+          set -euo pipefail
+          docker run -d --name otp-pw -p 2225:2222 \
+            -e PUBLIC_KEY="$(cat /tmp/test_key.pub)" \
+            -e USER_NAME=tester \
+            -e PASSWORD_ACCESS=true \
+            -e USER_PASSWORD=ci-test-password \
+            -e OTP_ACCESS=true \
+            openssh-server:test
+          for _ in $(seq 1 60); do nc -z localhost 2225 && break; sleep 1; done
+          sleep 2
+          docker exec otp-pw grep -q "^AuthenticationMethods keyboard-interactive publickey,keyboard-interactive$" /config/sshd/sshd_config
+          if docker exec otp-pw grep -qE '^#[[:space:]]*auth[[:space:]]' /etc/pam.d/sshd; then
+            echo "FAIL: unix auth was commented out while PASSWORD_ACCESS is true"
+            exit 1
+          fi
+          echo "OK: password and OTP are stacked"
+          docker rm -f otp-pw
+
+      - name: 'Toggle OTP off again on a persisted volume'
+        run: |
+          set -euo pipefail
+          VOL=$(mktemp -d)
+          docker run -d --name otp-toggle -p 2224:2222 \
+            -e PUBLIC_KEY="$(cat /tmp/test_key.pub)" \
+            -e USER_NAME=tester -e OTP_ACCESS=true \
+            -v "$VOL":/config openssh-server:test
+          for _ in $(seq 1 60); do nc -z localhost 2224 && break; sleep 1; done
+          sleep 2
+          docker exec otp-toggle grep -q "OTP_ACCESS" /config/sshd/sshd_config
+          docker rm -f otp-toggle
+
+          docker run -d --name otp-toggle -p 2224:2222 \
+            -e PUBLIC_KEY="$(cat /tmp/test_key.pub)" \
+            -e USER_NAME=tester \
+            -v "$VOL":/config openssh-server:test
+          for _ in $(seq 1 60); do nc -z localhost 2224 && break; sleep 1; done
+          sleep 2
+          if docker exec otp-toggle grep -qE '^(OTP_ACCESS|UsePAM|KbdInteractiveAuthentication|AuthenticationMethods|# >>> OTP_ACCESS)' /config/sshd/sshd_config; then
+            echo "FAIL: the managed block survived disabling OTP_ACCESS"
+            docker exec otp-toggle cat /config/sshd/sshd_config
+            exit 1
+          fi
+          echo "OK: the persisted config was cleaned up"
+          docker rm -f otp-toggle
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f hc hc-port otp-off otp-on otp-pw otp-toggle 2>/dev/null || true
