@@ -261,20 +261,23 @@ jobs:
           }
           OK='account required pam_permit.so\nsession required pam_permit.so\n'
 
-          echo "===== 1. the stack we generate, as a baseline ====="
-          set_stack '#%PAM-1.0\n#auth      include   base-auth\naccount   include   base-account\npassword  include   base-password\nsession   include   base-session\nauth required pam_google_authenticator.so nullok secret=/config/.google_authenticator\n'
-          probe
+          # the module denies whatever its options are, which is what a module
+          # that never loads looks like: PAM cannot run it, and required fails
+          echo "===== where do the modules actually live? ====="
+          docker exec otp-diag ls -ld /lib /usr/lib /lib/security /usr/lib/security 2>&1
+          echo "--- /lib/security ---"
+          docker exec otp-diag sh -c 'ls /lib/security/ 2>&1 | head -30'
+          echo "--- /usr/lib/security ---"
+          docker exec otp-diag sh -c 'ls /usr/lib/security/ 2>&1 | head -30'
+          echo "--- can the module resolve its own dependencies? ---"
+          docker exec otp-diag sh -c 'ldd /usr/lib/security/pam_google_authenticator.so 2>&1 | head -10'
 
-          echo "===== 2. the module alone, no secret=, permissive rest ====="
+          echo "===== A. the module by bare name (control, expected to deny) ====="
           set_stack "#%PAM-1.0\nauth required pam_google_authenticator.so nullok\n$OK"
           probe
 
-          echo "===== 3. the module alone, with secret=, permissive rest ====="
-          set_stack "#%PAM-1.0\nauth required pam_google_authenticator.so nullok secret=/config/.google_authenticator\n$OK"
-          probe
-
-          echo "===== 4. permit auth, but the stock account and session ====="
-          set_stack '#%PAM-1.0\nauth required pam_permit.so\naccount   include   base-account\npassword  include   base-password\nsession   include   base-session\n'
+          echo "===== B. the module by absolute path ====="
+          set_stack "#%PAM-1.0\nauth required /usr/lib/security/pam_google_authenticator.so nullok\n$OK"
           probe
 
           echo "===== sshd log ====="
