@@ -181,8 +181,9 @@ jobs:
           for _ in $(seq 1 60); do nc -z localhost 2225 && break; sleep 1; done
           sleep 2
           docker exec otp-pw grep -q "^AuthenticationMethods keyboard-interactive publickey,keyboard-interactive$" /config/sshd/sshd_config
-          if docker exec otp-pw grep -qE '^#[[:space:]]*auth[[:space:]]' /etc/pam.d/sshd; then
-            echo "FAIL: unix auth was commented out while PASSWORD_ACCESS is true"
+          docker exec otp-pw cat /etc/pam.d/sshd
+          if ! docker exec otp-pw grep -qE '^[[:space:]]*auth[[:space:]]+include[[:space:]]+base-auth' /etc/pam.d/sshd; then
+            echo "FAIL: the unix auth stack was dropped while PASSWORD_ACCESS is true"
             exit 1
           fi
           echo "OK: password and OTP are stacked"

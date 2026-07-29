@@ -95,21 +95,31 @@ if [[ "$OTP_ACCESS" == "true" ]] || grep -q "pam_google_authenticator.so" /etc/p
     cp /etc/pam.d/sshd.default /etc/pam.d/sshd
 
     if [[ "$OTP_ACCESS" == "true" ]]; then
-        # the whole PAM auth stack runs for keyboard-interactive, so the unix
-        # password prompt is only left in place when password access is on too
-        if [[ "$PASSWORD_ACCESS" != "true" ]]; then
-            sed -i -E 's/^[[:space:]]*auth[[:space:]]/#&/' /etc/pam.d/sshd
-        fi
-
-        # nullok lets a user that has not enrolled yet log in, which is what
-        # makes the first google-authenticator run possible. The module says so
-        # by answering PAM_IGNORE, and a stack whose only module is ignored has
-        # nothing that succeeded, so it is the trailing pam_permit that carries
-        # the login. A wrong code dies before ever reaching it.
         {
+            echo "#%PAM-1.0"
+
+            # the whole auth stack runs for keyboard-interactive, so the unix
+            # password prompt is only carried over when password access is on
+            if [[ "$PASSWORD_ACCESS" == "true" ]]; then
+                grep -E '^[[:space:]]*auth[[:space:]]' /etc/pam.d/sshd.default
+            fi
+
+            # nullok lets a user that has not enrolled yet log in, which is what
+            # makes the first otp-setup run possible. The module says so by
+            # answering PAM_IGNORE, and a stack whose only module is ignored has
+            # nothing that succeeded, so it is the trailing pam_permit that
+            # carries the login. A wrong code dies before reaching it.
             echo "auth [success=ok ignore=ignore default=die] pam_google_authenticator.so nullok secret=${OTP_SECRET}"
             echo "auth required pam_permit.so"
-        } >> /etc/pam.d/sshd
+
+            # the stock account and session checks read /etc/shadow, which sshd
+            # cannot do here because it runs as the ssh user rather than root.
+            # Nothing is lost by leaving them out: without OTP this image does
+            # not enable PAM at all, so none of them run today either.
+            echo "account required pam_permit.so"
+            echo "password required pam_permit.so"
+            echo "session required pam_permit.so"
+        } > /etc/pam.d/sshd
     fi
 fi
 sed -i '/^# >>> OTP_ACCESS >>>$/,/^# <<< OTP_ACCESS <<<$/d' /config/sshd/sshd_config
