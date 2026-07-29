@@ -121,7 +121,7 @@ jobs:
 
           echo "--- pam.d ---"; docker exec otp-on ls -l /etc/pam.d/
           echo "--- user ---"; docker exec otp-on getent passwd tester
-          echo "--- sshd process ---"; docker exec otp-on ps -o pid,user,args | grep -i sshd
+          echo "--- sshd process ---"; docker exec otp-on ps -o pid,user,args 2>/dev/null | grep -i sshd || true
           echo "--- pam.d/sshd.pam ---"; docker exec otp-on cat /etc/pam.d/sshd.pam
 
           docker exec otp-on grep -q "^UsePAM yes$" /config/sshd/sshd_config
