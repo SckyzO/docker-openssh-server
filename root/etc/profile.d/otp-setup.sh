@@ -3,7 +3,7 @@
 # code, so nothing else would tell them the secret is still missing.
 
 [ -z "$SSH_CONNECTION" ] && return 0
-grep -q "pam_google_authenticator.so" /etc/pam.d/sshd.pam 2>/dev/null || return 0
+grep -q "pam_google_authenticator.so" /etc/pam.d/sshd 2>/dev/null || return 0
 [ -f /config/.google_authenticator ] && return 0
 
 cat << 'BANNER'

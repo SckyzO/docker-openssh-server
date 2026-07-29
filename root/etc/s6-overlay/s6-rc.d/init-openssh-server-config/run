@@ -89,8 +89,8 @@ fi
 # otp (2FA) access
 OTP_SECRET=/config/.google_authenticator
 
-# both files are rebuilt from a known state on every start so the variable can
-# be turned back off again
+# rebuilt from a known state on every start so the variable can be turned back
+# off again. sshd resolves the plain sshd PAM service, not sshd.pam.
 if [[ "$OTP_ACCESS" == "true" ]] || grep -q "pam_google_authenticator.so" /etc/pam.d/sshd; then
     cp /etc/pam.d/sshd.default /etc/pam.d/sshd
 
@@ -102,13 +102,15 @@ if [[ "$OTP_ACCESS" == "true" ]] || grep -q "pam_google_authenticator.so" /etc/p
         fi
 
         # nullok lets a user that has not enrolled yet log in, which is what
-        # makes the first google-authenticator run possible
-        echo "auth required pam_google_authenticator.so nullok secret=${OTP_SECRET}" >> /etc/pam.d/sshd
+        # makes the first google-authenticator run possible. The module says so
+        # by answering PAM_IGNORE, and a stack whose only module is ignored has
+        # nothing that succeeded, so it is the trailing pam_permit that carries
+        # the login. A wrong code dies before ever reaching it.
+        {
+            echo "auth [success=ok ignore=ignore default=die] pam_google_authenticator.so nullok secret=${OTP_SECRET}"
+            echo "auth required pam_permit.so"
+        } >> /etc/pam.d/sshd
     fi
-
-    # the server is started as sshd.pam, and PAM takes its service name from
-    # argv[0], so the stack it actually reads is /etc/pam.d/sshd.pam
-    cp /etc/pam.d/sshd /etc/pam.d/sshd.pam
 fi
 sed -i '/^# >>> OTP_ACCESS >>>$/,/^# <<< OTP_ACCESS <<<$/d' /config/sshd/sshd_config
 

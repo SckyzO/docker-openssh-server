@@ -95,7 +95,7 @@ jobs:
             echo "FAIL: managed block present while OTP_ACCESS is unset"
             exit 1
           fi
-          if docker exec otp-off grep -q "pam_google_authenticator" /etc/pam.d/sshd /etc/pam.d/sshd.pam; then
+          if docker exec otp-off grep -q "pam_google_authenticator" /etc/pam.d/sshd; then
             echo "FAIL: pam_google_authenticator present while OTP_ACCESS is unset"
             exit 1
           fi
@@ -122,13 +122,15 @@ jobs:
           echo "--- pam.d ---"; docker exec otp-on ls -l /etc/pam.d/
           echo "--- user ---"; docker exec otp-on getent passwd tester
           echo "--- sshd process ---"; docker exec otp-on ps -o pid,user,args 2>/dev/null | grep -i sshd || true
-          echo "--- pam.d/sshd.pam ---"; docker exec otp-on cat /etc/pam.d/sshd.pam
+          echo "--- pam.d/sshd ---"; docker exec otp-on cat /etc/pam.d/sshd
 
           docker exec otp-on grep -q "^UsePAM yes$" /config/sshd/sshd_config
           docker exec otp-on grep -q "^KbdInteractiveAuthentication yes$" /config/sshd/sshd_config
           docker exec otp-on grep -q "^AuthenticationMethods publickey,keyboard-interactive$" /config/sshd/sshd_config
           docker exec otp-on grep -q "pam_google_authenticator.so nullok" /etc/pam.d/sshd
-          docker exec otp-on grep -q "pam_google_authenticator.so nullok" /etc/pam.d/sshd.pam
+          # the module answers PAM_IGNORE before enrollment, so something must
+          # still succeed for the stack to pass
+          docker exec otp-on grep -q "^auth required pam_permit.so$" /etc/pam.d/sshd
 
           # BatchMode would disable keyboard-interactive client side, and the
           # server requires it, so stdin is closed instead: any prompt fails.
@@ -179,7 +181,7 @@ jobs:
           for _ in $(seq 1 60); do nc -z localhost 2225 && break; sleep 1; done
           sleep 2
           docker exec otp-pw grep -q "^AuthenticationMethods keyboard-interactive publickey,keyboard-interactive$" /config/sshd/sshd_config
-          if docker exec otp-pw grep -qE '^#[[:space:]]*auth[[:space:]]' /etc/pam.d/sshd.pam; then
+          if docker exec otp-pw grep -qE '^#[[:space:]]*auth[[:space:]]' /etc/pam.d/sshd; then
             echo "FAIL: unix auth was commented out while PASSWORD_ACCESS is true"
             exit 1
           fi
@@ -212,65 +214,6 @@ jobs:
           fi
           echo "OK: the persisted config was cleaned up"
           docker rm -f otp-toggle
-
-      # Last on purpose: it runs even when the strict steps above fail, and its
-      # output then sits at the end of the job log where it is easy to read.
-      - name: 'Diagnose: is it the PAM stack, or sshd not being root?'
-        if: always()
-        run: |
-          # the runner starts steps with bash -e and these probes are expected
-          # to fail, so failures must not abort the step
-          set +e
-          docker rm -f otp-diag 2>/dev/null
-          docker run -d --name otp-diag -p 2226:2222 \
-            -e PUBLIC_KEY="$(cat /tmp/test_key.pub)" \
-            -e USER_NAME=tester -e OTP_ACCESS=true -e LOG_STDOUT=true \
-            openssh-server:test
-          for _ in $(seq 1 60); do nc -z localhost 2226 && break; sleep 1; done
-          sleep 2
-
-          # the module refuses by bare name and by absolute path alike, so stop
-          # guessing: it logs its reason through syslog, and nothing in the
-          # container collects that, so start a collector and read it
-          docker exec -d otp-diag syslogd -n -O /var/log/pam.log
-          sleep 1
-
-          # probes run against a private sshd so the per-source penalty of
-          # OpenSSH 9.8+ cannot start dropping connections mid-diagnosis
-          docker cp /tmp/test_key otp-diag:/tmp/test_key
-          docker exec otp-diag chmod 600 /tmp/test_key
-          docker exec -d otp-diag /usr/sbin/sshd.pam -D -p 2299 \
-            -f /config/sshd/sshd_config \
-            -h /config/ssh_host_keys/ssh_host_ed25519_key \
-            -o PidFile=/tmp/sshd-diag.pid \
-            -o PerSourcePenalties=no
-          sleep 3
-
-          probe() {
-            docker exec otp-diag ssh -i /tmp/test_key \
-                -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-                -o ConnectTimeout=10 \
-                -o PreferredAuthentications=publickey,keyboard-interactive \
-                -p 2299 tester@localhost 'echo LOGIN-OK' < /dev/null 2>&1 | tail -1
-          }
-          # cross probing the two names showed sshd is the one PAM resolves, so
-          # everything below rewrites /etc/pam.d/sshd only
-          set_stack() {
-            docker exec otp-diag sh -c 'printf "%b" "$1" > /etc/pam.d/sshd' _ "$1"
-            docker exec otp-diag cat /etc/pam.d/sshd
-          }
-          OK='account required pam_permit.so\nsession required pam_permit.so\n'
-
-          echo "===== the module, with debug, saying why it refuses ====="
-          set_stack "#%PAM-1.0\nauth required pam_google_authenticator.so nullok debug\n$OK"
-          probe
-
-          echo "===== what the module logged ====="
-          docker exec otp-diag sh -c 'cat /var/log/pam.log 2>&1 | tail -20'
-
-          echo "===== does the shared object resolve ====="
-          docker exec otp-diag sh -c 'ldd /usr/lib/security/pam_google_authenticator.so 2>&1 | head -6'
-          docker rm -f otp-diag
 
       - name: Cleanup
         if: always()
