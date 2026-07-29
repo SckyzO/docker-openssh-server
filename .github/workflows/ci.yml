@@ -108,7 +108,9 @@ jobs:
 
       - name: 'Diagnose which layer of the PAM stack denies'
         run: |
-          set -uo pipefail
+          # the runner starts steps with bash -e, and every probe here is
+          # expected to fail at least once, so failures must not abort
+          set +e
           docker run -d --name otp-diag -p 2226:2222 \
             -e PUBLIC_KEY="$(cat /tmp/test_key.pub)" \
             -e USER_NAME=tester -e OTP_ACCESS=true -e LOG_STDOUT=true \
@@ -141,6 +143,17 @@ jobs:
           echo "== 4. google-authenticator, permissive account/session =="
           set_stack '#%PAM-1.0\nauth required pam_google_authenticator.so nullok debug secret=/config/.google_authenticator\naccount required pam_permit.so\nsession required pam_permit.so\n'
           try
+
+          echo "== 5. google-authenticator without secret=, default \$HOME =="
+          set_stack '#%PAM-1.0\nauth required pam_google_authenticator.so nullok debug\naccount required pam_permit.so\nsession required pam_permit.so\n'
+          try
+
+          echo "== 6. module marked sufficient rather than required =="
+          set_stack '#%PAM-1.0\nauth sufficient pam_google_authenticator.so nullok debug\nauth required pam_permit.so\naccount required pam_permit.so\nsession required pam_permit.so\n'
+          try
+
+          echo "== where the module lives =="
+          docker exec otp-diag ls -l /usr/lib/security/ 2>&1 | head -20
 
           echo "== sshd log =="
           docker logs otp-diag 2>&1 | tail -25
